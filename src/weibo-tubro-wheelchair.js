@@ -25,6 +25,9 @@
     let likeCount = 0;
     let panelExpanded = true;
     let scrollIntervalId = null;
+    let isProcessing = false;  // 新增：标记是否正在处理按钮
+    let lastProcessedButtonId = null;  // 新增：记录上次处理的按钮ID
+    let processedButtons = new Set();  // 新增：记录已处理过的按钮
 
     // Create control panel
     function createPanel() {
@@ -60,7 +63,7 @@
         if (panelExpanded) {
             panel.innerHTML = `
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <h3 style="margin: 0; font-size: 16px;">微博涡轮轮椅</h3>
+                    <h3 style="margin: 0; font-size: 16px;">全自动涡轮轮椅-Powered by 微博智驾</h3>
                     <button id="auto-liker-minimize" style="background: none; border: none; color: white; cursor: pointer; font-size: 16px;">−</button>
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
@@ -188,6 +191,17 @@
         return current;
     }
 
+    // 新增：为按钮生成唯一ID
+    function getButtonId(button) {
+        if (!button.dataset.autoLikerId) {
+            const parentItem = findParentItem(button);
+            const timestamp = Date.now();
+            const random = Math.floor(Math.random() * 10000);
+            button.dataset.autoLikerId = `btn-${timestamp}-${random}`;
+        }
+        return button.dataset.autoLikerId;
+    }
+
     // Update countdown in like button
     function updateCountdown(likeButton, timeLeft) {
         const countSpan = likeButton.querySelector('.woo-like-count');
@@ -239,29 +253,63 @@
 
     // Process like buttons
     async function processLikeButtons() {
-        if (!isRunning) return;
-
-        // 获取所有点赞按钮并按照它们在页面中的位置排序（从上到下）
-        const likeButtons = Array.from(document.querySelectorAll('button.woo-like-main'))
-            .sort((a, b) => {
-                const rectA = a.getBoundingClientRect();
-                const rectB = b.getBoundingClientRect();
-                return rectA.top - rectB.top;
+        if (!isRunning || isProcessing) return;
+        
+        isProcessing = true;
+        
+        try {
+            // 获取所有点赞按钮并按照它们在页面中的位置排序（从上到下）
+            const allLikeButtons = Array.from(document.querySelectorAll('button.woo-like-main'))
+                .sort((a, b) => {
+                    const rectA = a.getBoundingClientRect();
+                    const rectB = b.getBoundingClientRect();
+                    return rectA.top - rectB.top;
+                });
+                
+            console.log(`Found ${allLikeButtons.length} like buttons`);
+            
+            // 过滤出未处理过的按钮
+            const likeButtons = allLikeButtons.filter(button => {
+                const buttonId = getButtonId(button);
+                return !processedButtons.has(buttonId);
             });
             
-        console.log(`Found ${likeButtons.length} like buttons`);
+            console.log(`Found ${likeButtons.length} unprocessed like buttons`);
+            
+            if (likeButtons.length === 0) {
+                // 如果没有未处理的按钮，滚动页面加载更多内容
+                console.log('No unprocessed buttons found, scrolling to load more...');
+                window.scrollBy({
+                    top: config.scrollStep * 2,
+                    behavior: 'smooth'
+                });
+                
+                // 等待新内容加载
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                isProcessing = false;
+                return;
+            }
 
-        for (const button of likeButtons) {
-            if (!isRunning) break;
+            // 只处理第一个未处理的按钮
+            const button = likeButtons[0];
+            const buttonId = getButtonId(button);
+            
+            // 记录这个按钮已被处理
+            processedButtons.add(buttonId);
+            lastProcessedButtonId = buttonId;
 
             // 只处理视窗内和视窗下方的按钮
             const rect = button.getBoundingClientRect();
-            if (rect.top < 0) continue; // 跳过视窗上方的按钮
+            if (rect.top < 0) {
+                isProcessing = false;
+                return; // 跳过视窗上方的按钮
+            }
 
             // 如果配置为跳过已点赞的微博，则检查是否已点赞
             if (config.skipLiked && isAlreadyLiked(button)) {
                 console.log('Skipping already liked post');
-                continue;
+                isProcessing = false;
+                return;
             }
 
             // Find parent item and highlight it
@@ -269,7 +317,7 @@
             let originalBackground = '';
             
             if (parentItem) {
-                originalBackground = parentItem.style.backgroundColor;
+                originalBackground = parentItem.style.backgroundColor || '';
                 parentItem.style.backgroundColor = '#f09199';
                 scrollIntoViewIfNeeded(parentItem);
             }
@@ -307,6 +355,13 @@
             if (parentItem) {
                 parentItem.style.backgroundColor = originalBackground;
             }
+        } finally {
+            isProcessing = false;
+            
+            // 如果仍在运行，安排下一次处理
+            if (isRunning) {
+                setTimeout(processLikeButtons, 500);
+            }
         }
     }
 
@@ -318,24 +373,35 @@
 
         scrollIntervalId = setInterval(() => {
             if (!isRunning) return;
-
-            // Don't auto-scroll if we're in the middle of processing an item
-            const processingItem = document.querySelector('.wbpro-scroller-item[style*="background-color: rgb(240, 145, 153)"]');
-            if (processingItem) return;
-
-            // 向下滚动
-            window.scrollBy({
-                top: config.scrollStep,
-                behavior: 'smooth'
-            });
             
-            // 等待滚动完成后再处理按钮，给页面足够时间加载新内容
-            setTimeout(() => {
-                processLikeButtons();
-            }, 1000); // 增加等待时间，确保新内容加载完毕
-
-            // If we're near the bottom of the page, process any remaining buttons
-            if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+            // 检查是否有未处理的按钮
+            const unprocessedButtons = Array.from(document.querySelectorAll('button.woo-like-main'))
+                .filter(button => {
+                    const buttonId = getButtonId(button);
+                    return !processedButtons.has(buttonId);
+                });
+                
+            // 如果没有未处理的按钮，且我们接近页面底部，则滚动加载更多
+            if (unprocessedButtons.length === 0 || 
+                ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 1000)) {
+                
+                // 检查是否有正在处理的项目
+                if (!isProcessing) {
+                    console.log('Scrolling to load more content...');
+                    window.scrollBy({
+                        top: config.scrollStep,
+                        behavior: 'smooth'
+                    });
+                    
+                    // 等待滚动完成后再处理按钮
+                    setTimeout(() => {
+                        if (!isProcessing) {
+                            processLikeButtons();
+                        }
+                    }, 1500);
+                }
+            } else if (!isProcessing) {
+                // 如果有未处理的按钮且当前没有正在处理的按钮，则处理下一个
                 processLikeButtons();
             }
         }, config.scrollInterval);
@@ -349,6 +415,8 @@
         updatePanelContent(panel);
 
         if (isRunning) {
+            // 重置处理状态
+            isProcessing = false;
             startAutoScroll();
             processLikeButtons();
         } else {
@@ -356,6 +424,11 @@
                 clearInterval(scrollIntervalId);
                 scrollIntervalId = null;
             }
+            
+            // 重置所有标记的背景
+            document.querySelectorAll('.wbpro-scroller-item[style*="background-color: rgb(240, 145, 153)"]').forEach(item => {
+                item.style.backgroundColor = '';
+            });
         }
     }
 
@@ -363,11 +436,19 @@
     function stopAutoLike() {
         isRunning = false;
         likeCount = 0;
+        isProcessing = false;
+        lastProcessedButtonId = null;
+        processedButtons.clear();  // 清空已处理按钮集合
 
         if (scrollIntervalId) {
             clearInterval(scrollIntervalId);
             scrollIntervalId = null;
         }
+
+        // 重置所有标记的背景
+        document.querySelectorAll('.wbpro-scroller-item[style*="background-color: rgb(240, 145, 153)"]').forEach(item => {
+            item.style.backgroundColor = '';
+        });
 
         const panel = document.getElementById('auto-liker-panel');
         updatePanelContent(panel);
